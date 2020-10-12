@@ -178,6 +178,7 @@ impl LanguageClient {
             preferred_markup_kind,
             hide_virtual_texts_on_insert,
             enable_extensions,
+            code_lens_hl_group,
         ): (
             Option<usize>,
             String,
@@ -192,6 +193,7 @@ impl LanguageClient {
             Option<Vec<MarkupKind>>,
             u8,
             Option<HashMap<String, bool>>,
+            String,
         ) = self.vim()?.eval(
             [
                 "get(g:, 'LanguageClient_diagnosticsSignsMax', v:null)",
@@ -207,6 +209,7 @@ impl LanguageClient {
                 "get(g:, 'LanguageClient_preferredMarkupKind', v:null)",
                 "s:GetVar('LanguageClient_hideVirtualTextsOnInsert', 0)",
                 "get(g:, 'LanguageClient_enableExtensions', v:null)",
+                "get(g:, 'LanguageClient_codeLensHighlightGroup', 'Comment')",
             ]
             .as_ref(),
         )?;
@@ -324,6 +327,7 @@ impl LanguageClient {
             state.is_nvim = is_nvim;
             state.preferred_markup_kind = preferred_markup_kind;
             state.enable_extensions = enable_extensions;
+            state.code_lens_hl_group = code_lens_hl_group;
             Ok(())
         })?;
 
@@ -1213,6 +1217,7 @@ impl LanguageClient {
                         }),
                         signature_help: Some(SignatureHelpCapability {
                             signature_information: Some(SignatureInformationSettings {
+                                active_parameter_support: None,
                                 documentation_format: preferred_markup_kind.clone(),
                                 parameter_information: Some(ParameterInformationSettings {
                                     label_offset_support: Some(true),
@@ -2333,6 +2338,7 @@ impl LanguageClient {
         self.get_client(&Some(language_id))?.notify(
             lsp_types::notification::DidSaveTextDocument::METHOD,
             DidSaveTextDocumentParams {
+                text: None,
                 text_document: TextDocumentIdentifier { uri },
             },
         )?;
@@ -3377,6 +3383,7 @@ impl LanguageClient {
         let mut virtual_texts = vec![];
         let code_lenses =
             self.get(|state| state.code_lens.get(filename).cloned().unwrap_or_default())?;
+        let code_lens_hl_group = self.get(|state| state.code_lens_hl_group.clone())?;
 
         for cl in code_lenses {
             if let Some(command) = cl.command {
@@ -3393,7 +3400,7 @@ impl LanguageClient {
                     None => virtual_texts.push(VirtualText {
                         line,
                         text,
-                        hl_group: "Comment".into(),
+                        hl_group: code_lens_hl_group.clone(),
                     }),
                 }
             }
