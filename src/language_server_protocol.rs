@@ -3180,7 +3180,7 @@ impl LanguageClient {
                 .entry(filename.clone())
                 .or_default()
                 .iter()
-                .filter(|diag| viewport.overlaps(diag.range))
+                // .filter(|diag| viewport.overlaps(diag.range))
                 .sorted_by_key(|diag| {
                     (
                         diag.range.start.line,
