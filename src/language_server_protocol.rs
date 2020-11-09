@@ -2847,7 +2847,7 @@ impl LanguageClient {
             let diagnostics = state.diagnostics.get(filename).cloned().unwrap_or_default();
             let mut diagnostics = diagnostics
                 .iter()
-                .filter(|diag| viewport.overlaps(diag.range))
+                // .filter(|diag| viewport.overlaps(diag.range))
                 .sorted_by_key(|diag| {
                     (
                         diag.range.start.line,

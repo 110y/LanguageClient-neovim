@@ -20,6 +20,7 @@ use lsp_types::{
 };
 use maplit::hashmap;
 use pathdiff::diff_paths;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -617,6 +618,15 @@ impl VimCompleteItem {
             lspitem: Some(lspitem.clone()),
             snippet: snippet.clone(),
         };
+
+        let placeholder_regex = Regex::new(r"[\s]*?\$\{\d+?.*?\}[,]?[\s]*?").unwrap();
+        let word = placeholder_regex.replace_all(&word, "").to_string();
+
+        let simple_placeholder_regex = Regex::new(r"[\s]*?\$\d+?\s*?").unwrap();
+        let word = simple_placeholder_regex.replace_all(&word, "").to_string();
+
+        let paren_regex = Regex::new(r"[\(]?[\)]?").unwrap();
+        let word = paren_regex.replace_all(&word, "").to_string();
 
         #[allow(deprecated)]
         Ok(Self {
