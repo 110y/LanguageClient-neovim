@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::{Config, ServerCommand};
 use crate::extensions::java;
 use crate::language_client::LanguageClient;
 use crate::sign::Sign;
@@ -26,8 +26,8 @@ use lsp_types::{
     CodeActionContext, CodeActionKind, CodeActionKindLiteralSupport, CodeActionLiteralSupport,
     CodeActionOrCommand, CodeActionParams, CodeActionResponse, CodeLens, Command,
     CompletionCapability, CompletionItem, CompletionItemCapability, CompletionResponse,
-    CompletionTextEdit, Diagnostic, DiagnosticSeverity, DidChangeConfigurationParams,
-    DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    CompletionTextEdit, ConfigurationParams, Diagnostic, DiagnosticSeverity,
+    DidChangeConfigurationParams, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
     DidChangeWatchedFilesRegistrationOptions, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentChangeOperation, DocumentChanges,
     DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind,
@@ -98,7 +98,7 @@ impl LanguageClient {
         self.update_state(|state| {
             state
                 .logger
-                .update_settings(config.logging_level.clone(), config.logging_file.clone())
+                .update_settings(config.logging_level, config.logging_file.clone())
         })?;
 
         let semantic_highlight_language_ids: Vec<String> =
@@ -847,23 +847,25 @@ impl LanguageClient {
         let root =
             self.get_state(|state| state.roots.get(&language_id).cloned().unwrap_or_default())?;
 
-        let initialization_options = self
-            .get_workspace_settings(&root)
-            .map(|s| s["initializationOptions"].clone())
-            .unwrap_or_else(|err| {
-                warn!("Failed to get initializationOptions: {}", err);
-                json!(Value::Null)
-            });
-        let initialization_options =
-            get_default_initialization_options(&language_id).combine(&initialization_options);
-        let initialization_options = if initialization_options.is_null() {
-            None
-        } else {
-            Some(initialization_options)
-        };
-
         let trace = self.get_config(|c| c.trace)?;
         let preferred_markup_kind = self.get_config(|c| c.preferred_markup_kind.clone())?;
+        let command = self.get_config(|c| c.server_commands.get(&language_id).cloned())?;
+        if command.is_none() {
+            return Err(anyhow!(
+                "No server command found for language {}",
+                language_id
+            ));
+        }
+        let command = command.unwrap();
+
+        let settings = self.get_workspace_settings(&root).unwrap_or_default();
+        // warn the user that they are using a deprecated workspace settings
+        // file format and direct them to the documentation about the new one
+        if settings.pointer("/initializationOptions").is_some() {
+            let _ = self.vim()?.echoerr("You seem to be using an incorrect workspace settings format for LanguageClient-neovim, to learn more about this error see `:help g:LanguageClient_settingsPath`");
+        }
+
+        let initialization_options = merged_initialization_options(&command, &settings)?;
 
         let result: Value = self.get_client(&Some(language_id.clone()))?.call(
             lsp_types::request::Initialize::METHOD,
@@ -961,6 +963,7 @@ impl LanguageClient {
                     }),
                     workspace: Some(WorkspaceClientCapabilities {
                         apply_edit: Some(true),
+                        configuration: Some(true),
                         did_change_watched_files: Some(GenericCapability {
                             dynamic_registration: Some(true),
                         }),
@@ -979,11 +982,10 @@ impl LanguageClient {
                 .server_info
                 .as_ref()
                 .map(|info| info.name.clone());
-            match (server_name, initialization_options) {
-                (Some(name), Some(options)) => {
-                    state.initialization_options.insert(name, options);
-                }
-                _ => {}
+            if let (Some(name), Some(options)) = (server_name, initialization_options) {
+                state.initialization_options = state
+                    .initialization_options
+                    .combine(&json!({ name: options }));
             }
 
             state
@@ -1297,7 +1299,7 @@ impl LanguageClient {
         if actions.len() > 1 {
             return Err(anyhow!("Too many code actions found with kind {}", kind));
         }
-        if actions.len() == 0 {
+        if actions.is_empty() {
             return Err(anyhow!("No code actions found with kind {}", kind));
         }
 
@@ -1787,6 +1789,23 @@ impl LanguageClient {
         Ok(())
     }
 
+    pub fn workspace_configuration(&self, params: &Value) -> Result<Value> {
+        let config_params = ConfigurationParams::deserialize(params)?;
+
+        let settings = self.get_state(|state| state.initialization_options.clone())?;
+
+        let configuration_items = config_params
+            .items
+            .into_iter()
+            .filter_map(|item| {
+                let section = format!("/{}", item.section?.replace(".", "/"));
+                settings.pointer(&section).cloned()
+            })
+            .collect::<Value>();
+
+        Ok(configuration_items)
+    }
+
     pub fn handle_code_lens_action(&self, params: &Value) -> Result<Value> {
         let filename = self.vim()?.get_filename(params)?;
         let line = self.vim()?.get_position(params)?.line;
@@ -2059,7 +2078,7 @@ impl LanguageClient {
 
         let uri = filename.to_url()?;
 
-        self.get_client(&Some(language_id.clone()))?.notify(
+        self.get_client(&Some(language_id))?.notify(
             lsp_types::notification::DidSaveTextDocument::METHOD,
             DidSaveTextDocumentParams {
                 text: None,
@@ -2588,7 +2607,7 @@ impl LanguageClient {
         let language_id = self.vim()?.get_language_id(&filename, params)?;
 
         let _: () = self
-            .get_client(&Some(language_id.clone()))?
+            .get_client(&Some(language_id))?
             .call(lsp_types::request::Shutdown::METHOD, Value::Null)?;
 
         self.vim()?
@@ -2636,7 +2655,7 @@ impl LanguageClient {
 
     #[tracing::instrument(level = "info", skip(self))]
     pub fn register_server_commands(&self, params: &Value) -> Result<Value> {
-        let commands = HashMap::<String, Vec<String>>::deserialize(params)?;
+        let commands = HashMap::<String, ServerCommand>::deserialize(params)?;
         self.update_config(|c| c.server_commands.extend(commands))?;
         let exp = format!(
             "let g:LanguageClient_serverCommands={}",
@@ -3011,26 +3030,28 @@ impl LanguageClient {
         viewport: &viewport::Viewport,
     ) -> Result<Vec<VirtualText>> {
         let mut virtual_texts = vec![];
-        let diagnostics = self.get_state(|state| state.diagnostics.clone())?;
+        let diagnostics =
+            self.get_state(|state| state.diagnostics.get(filename).cloned().unwrap_or_default())?;
+        let diagnostics: Vec<Diagnostic> = diagnostics
+            .into_iter()
+            .sorted_by(|a, b| Ord::cmp(&b.severity, &a.severity))
+            .collect();
         let diagnostics_display = self.get_config(|c| c.diagnostics_display.clone())?;
-        let diag_list = diagnostics.get(filename);
-        if let Some(diag_list) = diag_list {
-            for diag in diag_list {
-                if viewport.overlaps(diag.range) {
-                    let mut explanation = diag.message.clone();
-                    if let Some(source) = &diag.source {
-                        explanation = format!("{}: {}\n", source, explanation);
-                    }
-                    virtual_texts.push(VirtualText {
-                        line: diag.range.start.line,
-                        text: explanation.replace("\n", "  "),
-                        hl_group: diagnostics_display
-                            .get(&(diag.severity.unwrap_or(DiagnosticSeverity::Hint) as u64))
-                            .ok_or_else(|| anyhow!("Failed to get display"))?
-                            .virtual_texthl
-                            .clone(),
-                    });
+        for diag in diagnostics {
+            if viewport.overlaps(diag.range) {
+                let mut explanation = diag.message.clone();
+                if let Some(source) = &diag.source {
+                    explanation = format!("{}: {}\n", source, explanation);
                 }
+                virtual_texts.push(VirtualText {
+                    line: diag.range.start.line,
+                    text: explanation.replace("\n", "  "),
+                    hl_group: diagnostics_display
+                        .get(&(diag.severity.unwrap_or(DiagnosticSeverity::Hint) as u64))
+                        .ok_or_else(|| anyhow!("Failed to get display"))?
+                        .virtual_texthl
+                        .clone(),
+                });
             }
         }
 
@@ -3076,7 +3097,7 @@ impl LanguageClient {
         let code_lenses: Vec<CodeLens> =
             self.get_state(|state| match state.code_lens.get(filename) {
                 Some(cls) => cls
-                    .into_iter()
+                    .iter()
                     .filter(|cl| viewport.overlaps(cl.range))
                     .cloned()
                     .collect(),
@@ -3582,6 +3603,7 @@ impl LanguageClient {
                 })
             })
         })??;
+        let command = command.get_command();
 
         let root_path: Option<String> = try_get("rootPath", &params)?;
         let root = if let Some(r) = root_path {
@@ -3617,7 +3639,7 @@ impl LanguageClient {
                 (None, reader, writer)
             } else {
                 let command: Vec<_> = command
-                    .into_iter()
+                    .iter()
                     .map(|cmd| match shellexpand::full(&cmd) {
                         Ok(cmd) => cmd.as_ref().into(),
                         Err(err) => {
@@ -3663,7 +3685,7 @@ impl LanguageClient {
             };
 
         let lcn = self.clone();
-        let on_server_crash = move |language_id: &LanguageId| -> () {
+        let on_server_crash = move |language_id: &LanguageId| {
             if let Err(err) = lcn.on_server_crash(language_id) {
                 error!("Restart attempt failed: {}", err);
             }
@@ -3913,5 +3935,142 @@ impl LanguageClient {
         })?;
         self.vim()?.echo(&msg)?;
         Ok(json!(msg))
+    }
+}
+
+fn merged_initialization_options(
+    command: &ServerCommand,
+    settings: &Value,
+) -> Result<Option<Value>> {
+    let server_name = command.name();
+    let section = format!("/{}", server_name);
+    let default_initialization_options = get_default_initialization_options(&server_name);
+    let server_initialization_options = command.initialization_options();
+    let workspace_initialization_options =
+        settings.pointer(section.as_str()).unwrap_or(&Value::Null);
+    let initialization_options = default_initialization_options
+        .combine(&server_initialization_options)
+        .combine(workspace_initialization_options);
+
+    if initialization_options.is_null() {
+        Ok(None)
+    } else {
+        Ok(Some(initialization_options))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::config::{ServerCommand, ServerDetails};
+
+    #[test]
+    fn test_expands_initialization_options() {
+        let settings = json!({
+            "rust-analyzer": {
+                "rustfmt": {
+                    "overrideCommand": ["rustfmt"],
+                },
+                "checkOnSave": {
+                    "overrideCommand": ["cargo", "check"],
+                }
+            },
+        });
+        let command = ServerCommand::Detailed(ServerDetails {
+            name: "rust-analyzer".into(),
+            command: vec!["rust-analyzer".into()],
+            initialization_options: Some(json!({
+                "inlayHints.enable": true,
+            })),
+        });
+
+        let options = merged_initialization_options(&command, &settings)
+            .expect("could not get initialization options");
+        assert!(options.is_some());
+        assert_eq!(
+            json!({
+                "checkOnSave": {
+                    "overrideCommand": ["cargo", "check"],
+                },
+                "inlayHints": {
+                    "enable": true,
+                },
+                "rustfmt": {
+                    "overrideCommand": ["rustfmt"],
+                },
+            }),
+            options.unwrap()
+        );
+    }
+
+    #[test]
+    fn test_handles_empty_global_options() {
+        let settings = json!({
+            "gopls": {
+                "local": "github.com/import/path/to/package"
+            }
+        });
+        let command = ServerCommand::Detailed(ServerDetails {
+            name: "gopls".into(),
+            command: vec!["gopls".into()],
+            initialization_options: None,
+        });
+
+        let options = merged_initialization_options(&command, &settings)
+            .expect("could not get initialization options");
+        assert!(options.is_some());
+        assert_eq!(
+            json!({
+                "local": "github.com/import/path/to/package",
+            }),
+            options.unwrap()
+        );
+    }
+
+    #[test]
+    fn test_merges_global_and_workspace_local_options() {
+        let settings = json!({
+            "gopls": {
+                "local": "github.com/import/path/to/package"
+            }
+        });
+        let command = ServerCommand::Detailed(ServerDetails {
+            name: "gopls".into(),
+            command: vec!["gopls".into()],
+            initialization_options: Some(json!({
+                "usePlaceholders": true,
+            })),
+        });
+
+        let options = merged_initialization_options(&command, &settings)
+            .expect("could not get initialization options");
+        assert!(options.is_some());
+        assert_eq!(
+            json!({
+                "usePlaceholders": true,
+                "local": "github.com/import/path/to/package",
+            }),
+            options.unwrap()
+        );
+    }
+
+    #[test]
+    fn test_handles_options_for_simple_commands() {
+        let settings = json!({
+            "gopls": {
+                "local": "github.com/import/path/to/package"
+            }
+        });
+        let command = ServerCommand::Simple(vec!["gopls".into()]);
+
+        let options = merged_initialization_options(&command, &settings)
+            .expect("could not get initialization options");
+        assert!(options.is_some());
+        assert_eq!(
+            json!({
+                "local": "github.com/import/path/to/package",
+            }),
+            options.unwrap()
+        );
     }
 }

@@ -117,10 +117,7 @@ where
 }
 
 fn has_extension(path: &Path, ext: &str) -> bool {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some(path_ext) if path_ext == ext => true,
-        _ => false,
-    }
+    matches!(path.extension().and_then(|e| e.to_str()), Some(path_ext) if path_ext == ext)
 }
 
 fn traverse_up<'a, F>(path: &'a Path, predicate: F) -> Result<&'a Path>
@@ -397,7 +394,7 @@ where
 
 pub fn get_default_initialization_options(language_id: &str) -> Value {
     match language_id {
-        "java" => json!({
+        "lsp4j" => json!({
             "extendedClientCapabilities": {
                 "classFileContentsSupport": true
             }
@@ -706,6 +703,24 @@ mod test {
             json!({
                 "rust": {
                     "rls": true
+                }
+            })
+        );
+        assert_eq!(
+            expand_json_path(json!({
+                "rust-analyzer.inlayHints.enable": true,
+                "rust-analyzer.inlayHints.chainingHints": true,
+                "rust-analyzer.rustfmt.overrideCommand": ["rustfmt"],
+            })),
+            json!({
+                "rust-analyzer": {
+                    "rustfmt": {
+                        "overrideCommand": ["rustfmt"]
+                    },
+                    "inlayHints": {
+                        "enable": true,
+                        "chainingHints": true,
+                    }
                 }
             })
         );

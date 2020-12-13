@@ -7,10 +7,7 @@ use lsp_types::request::{self, Request};
 use serde_json::Value;
 
 fn is_content_modified_error(err: &anyhow::Error) -> bool {
-    match err.downcast_ref::<LSError>() {
-        Some(err) if err == &LSError::ContentModified => true,
-        _ => false,
-    }
+    matches!(err.downcast_ref::<LSError>(), Some(err) if err == &LSError::ContentModified)
 }
 
 impl LanguageClient {
@@ -86,6 +83,7 @@ impl LanguageClient {
             request::Rename::METHOD => self.text_document_rename(&params),
             request::DocumentSymbolRequest::METHOD => self.text_document_document_symbol(&params),
             request::ShowMessageRequest::METHOD => self.window_show_message_request(&params),
+            request::WorkspaceConfiguration::METHOD => self.workspace_configuration(&params),
             request::WorkspaceSymbol::METHOD => self.workspace_symbol(&params),
             request::CodeActionRequest::METHOD => self.text_document_code_action(&params),
             request::Completion::METHOD => self.text_document_completion(&params),

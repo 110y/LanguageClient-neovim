@@ -1,3 +1,7 @@
+mod server_command;
+
+pub use server_command::*;
+
 use crate::{
     types::{
         CodeLensDisplay, DiagnosticsDisplay, DiagnosticsList, DocumentHighlightDisplay,
@@ -14,7 +18,7 @@ use std::{path::PathBuf, str::FromStr, time::Duration};
 #[derive(Debug)]
 pub struct Config {
     pub auto_start: bool,
-    pub server_commands: HashMap<String, Vec<String>>,
+    pub server_commands: HashMap<String, ServerCommand>,
     pub selection_ui: SelectionUI,
     pub trace: TraceOption,
     pub settings_path: Vec<String>,
@@ -98,7 +102,7 @@ struct DeserializableConfig {
     logging_level: log::LevelFilter,
     server_stderr: Option<String>,
     auto_start: u8,
-    server_commands: HashMap<String, Vec<String>>,
+    server_commands: HashMap<String, ServerCommand>,
     selection_ui: Option<String>,
     trace: Option<String>,
     settings_path: Vec<String>,
@@ -190,11 +194,16 @@ impl Config {
             None => HoverPreviewOption::Auto,
         };
 
+        let mut diagnostics_display = DiagnosticsDisplay::default();
+        res.diagnostics_display.into_iter().for_each(|(k, v)| {
+            diagnostics_display.insert(k, v);
+        });
+
         Ok(Config {
             auto_start: res.auto_start == 1,
             server_commands: res.server_commands,
             selection_ui,
-            trace: trace(&res.trace.unwrap_or("off".to_string()))?,
+            trace: trace(&res.trace.unwrap_or_else(|| "off".to_string()))?,
             settings_path: res.settings_path,
             load_settings: res.load_settings == 1,
             root_markers: res.root_markers,
@@ -206,7 +215,7 @@ impl Config {
             ),
             diagnostics_enable: res.diagnostics_enable == 1,
             diagnostics_list,
-            diagnostics_display: res.diagnostics_display,
+            diagnostics_display,
             code_lens_display: res.code_lens_display.unwrap_or_default(),
             window_log_message_level: message_type(&res.window_log_message_level)?,
             hover_preview,
