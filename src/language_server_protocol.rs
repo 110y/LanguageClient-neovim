@@ -43,9 +43,9 @@ use lsp_types::{
     ShowMessageParams, ShowMessageRequestParams, SignatureHelp, SignatureHelpClientCapabilities,
     SignatureInformationSettings, SymbolInformation, TextDocumentClientCapabilities,
     TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, TextEdit, UnregistrationParams, VersionedTextDocumentIdentifier,
-    WorkDoneProgress, WorkDoneProgressParams, WorkspaceClientCapabilities, WorkspaceEdit,
-    WorkspaceSymbolParams,
+    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
+    UnregistrationParams, VersionedTextDocumentIdentifier, WorkDoneProgress,
+    WorkDoneProgressParams, WorkspaceClientCapabilities, WorkspaceEdit, WorkspaceSymbolParams,
 };
 use maplit::hashmap;
 use serde::de::Deserialize;
@@ -179,6 +179,12 @@ impl LanguageClient {
                 entry.name, entry.sign_text, entry.sign_texthl,
             ));
         }
+
+        let cld = self.get_config(|c| c.code_lens_display.clone())?;
+        cmds.push(format!(
+            "sign define LanguageClientCodeLens text={} texthl={}",
+            cld.sign_text, cld.sign_texthl
+        ));
 
         self.vim()?.command(cmds)?;
         Ok(())
@@ -2102,6 +2108,26 @@ impl LanguageClient {
     pub fn text_document_did_save(&self, params: &Value) -> Result<()> {
         let filename = self.vim()?.get_filename(params)?;
         let language_id = self.vim()?.get_language_id(&filename, params)?;
+        let has_capability = self.get_state(|s| {
+            s.capabilities
+                .get(&language_id)
+                .as_ref()
+                .map(|i| match i.capabilities.text_document_sync.as_ref() {
+                    Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::None)) => false,
+                    Some(TextDocumentSyncCapability::Kind(_)) => true,
+                    Some(TextDocumentSyncCapability::Options(o)) => match o.save {
+                        Some(lsp_types::TextDocumentSyncSaveOptions::Supported(b)) => b,
+                        Some(lsp_types::TextDocumentSyncSaveOptions::SaveOptions(_)) => true,
+                        None => false,
+                    },
+                    None => false,
+                })
+                .unwrap_or_default()
+        })?;
+        if !has_capability {
+            return Ok(());
+        }
+
         if !self.get_config(|c| c.server_commands.contains_key(&language_id))? {
             return Ok(());
         }
@@ -2892,10 +2918,11 @@ impl LanguageClient {
     #[tracing::instrument(level = "info", skip(self))]
     fn get_signs_to_display(&self, filename: &str, viewport: &Viewport) -> Result<Vec<Sign>> {
         let max_signs = self.get_config(|c| c.diagnostics_signs_max.unwrap_or(std::usize::MAX))?;
-        let signs: Vec<_> = self.get_state(|state| {
+        let mut signs = vec![];
+        let mut diagnostics: Vec<Sign> = self.get_state(|state| {
             let diagnostics = state.diagnostics.get(filename).cloned().unwrap_or_default();
             let mut diagnostics = diagnostics
-                .iter()
+                .into_iter()
                 // .filter(|diag| viewport.overlaps(diag.range))
                 .sorted_by_key(|diag| {
                     (
@@ -2905,14 +2932,22 @@ impl LanguageClient {
                 })
                 .collect_vec();
             diagnostics.dedup_by_key(|diag| diag.range.start.line);
-            diagnostics
-                .into_iter()
-                .take(max_signs)
-                .map(Into::into)
-                .collect()
+            diagnostics.iter().map(Into::into).collect_vec()
         })?;
 
-        Ok(signs)
+        let mut code_lenses: Vec<Sign> = self.get_state(|state| {
+            let ccll = state.code_lens.get(filename).cloned().unwrap_or_default();
+            let ccll = ccll
+                .iter()
+                .filter(|cl| viewport.overlaps(cl.range))
+                .map(Into::into)
+                .collect_vec();
+            ccll
+        })?;
+
+        signs.append(&mut diagnostics);
+        signs.append(&mut code_lenses);
+        Ok(signs.into_iter().take(max_signs).collect())
     }
 
     #[tracing::instrument(level = "info", skip(self))]
