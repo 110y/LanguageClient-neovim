@@ -1,4 +1,6 @@
-use crate::types::{Call, Id, LSError, LanguageId, RawMessage, ToInt, ToParams, ToRpcError};
+use crate::types::{
+    Call, Id, LanguageId, LanguageServerError, RawMessage, ToInt, ToParams, ToRpcError,
+};
 use anyhow::{anyhow, Result};
 use crossbeam::channel::{bounded, unbounded, Receiver, Sender};
 use log::*;
@@ -15,6 +17,7 @@ use std::{
 };
 
 const CONTENT_MODIFIED_ERROR_CODE: i64 = -32801;
+const REQUEST_CANCELLED_ERROR_CODE: i64 = -32800;
 
 lazy_static! {
     // this regex is used to remove some additional fields that we get from some servers, namely:
@@ -115,12 +118,11 @@ impl RpcClient {
             // which we don't want to show to the user and should ignore, as the result of the
             // request that triggered this error has been invalidated by changes to the state
             // of the server, so we must handle this error specifically.
-            jsonrpc_core::Output::Failure(err)
-                if err.error.code.code() == CONTENT_MODIFIED_ERROR_CODE =>
-            {
-                Err(anyhow::Error::from(LSError::ContentModified))
-            }
-            jsonrpc_core::Output::Failure(err) => Err(anyhow!("Error: {:?}", err)),
+            jsonrpc_core::Output::Failure(err) => match err.error.code.code() {
+                CONTENT_MODIFIED_ERROR_CODE => Err(anyhow!(LanguageServerError::ContentModified)),
+                REQUEST_CANCELLED_ERROR_CODE => Err(anyhow!(LanguageServerError::RequestCancelled)),
+                _ => Err(anyhow!("Error: {:?}", err)),
+            },
         }
     }
 
